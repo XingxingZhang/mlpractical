@@ -35,6 +35,10 @@ Create local branch
 ```
 git checkout -b mlp2016-7/lab[n] upstream/mlp2016-7/lab[n]
 ```
+Optionally, you can also merge the branch
+```
+git merge upstream/mlp2016-7/lab[n]
+```
 
 ### 4. Work on your own branch (optional)
 After you have finished step 3, you can create your own branch and work on it.

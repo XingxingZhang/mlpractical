@@ -41,7 +41,7 @@ After you have finished step 3, you can create your own branch and work on it.
 ```
 git checkout -b my-lab[n]-solution
 ```
-Then work on this branch. After your finished everything, then use
+Then work on this branch. After you finished everything, then use
 ```
 git status
 ```

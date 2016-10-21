@@ -3,7 +3,7 @@
 ## 1. Fork 
 Simply click `Fork` button on the upper right corner.
 
-## 2. Configuring a remote for the fork
+## 2. Add the original repo (as an upstream) to your fork
 ```
 git remote -v
 ```

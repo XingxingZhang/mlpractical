@@ -91,8 +91,11 @@ class Optimiser(object):
         epoch_stats = OrderedDict()
         epoch_stats.update(self.eval_monitors(self.train_dataset, '(train)'))
         if self.valid_dataset is not None:
+            self.model.eval_mode()
             epoch_stats.update(self.eval_monitors(
                 self.valid_dataset, '(valid)'))
+            self.model.train_mode()
+            
         epoch_stats['params_penalty'] = self.model.params_penalty()
         return epoch_stats
 

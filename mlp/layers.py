@@ -294,6 +294,8 @@ class SoftmaxLayer(Layer):
         return 'SoftmaxLayer'
 
 
+
+
 class RadialBasisFunctionLayer(Layer):
     """Layer implementing projection to a grid of radial basis functions."""
 

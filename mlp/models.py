@@ -148,3 +148,14 @@ class MultipleLayerModel(object):
             '\n    '.join([str(layer) for layer in self.layers]) +
             '\n)'
         )
+    
+    def train_mode(self):
+        for layer in self.layers:
+            if getattr(layer, 'train_mode', None):
+                layer.train_mode()
+    
+    def eval_mode(self):
+        for layer in self.layers:
+            if getattr(layer, 'eval_mode', None):
+                layer.eval_mode()
+    

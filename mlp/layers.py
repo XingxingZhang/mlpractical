@@ -539,3 +539,371 @@ class RadialBasisFunctionLayer(Layer):
 
     def __repr__(self):
         return 'RadialBasisFunctionLayer(grid_dim={0})'.format(self.grid_dim)
+
+
+class ConvolutionalLayer(LayerWithParameters):
+    """Layer implementing a 2D convolution-based transformation of its inputs.
+
+    The layer is parameterised by a set of 2D convolutional kernels, a four
+    dimensional array of shape
+        (num_output_channels, num_input_channels, kernel_dim_1, kernel_dim_2)
+    and a bias vector, a one dimensional array of shape
+        (num_output_channels,)
+    i.e. one shared bias per output channel.
+
+    Assuming no-padding is applied to the inputs so that outputs are only
+    calculated for positions where the kernel filters fully overlap with the
+    inputs, and that unit strides are used the outputs will have spatial extent
+        output_dim_1 = input_dim_1 - kernel_dim_1 + 1
+        output_dim_2 = input_dim_2 - kernel_dim_2 + 1
+    """
+
+    def __init__(self, num_input_channels, num_output_channels,
+                 input_dim_1, input_dim_2,
+                 kernel_dim_1, kernel_dim_2,
+                 kernels_init=init.UniformInit(-0.01, 0.01),
+                 biases_init=init.ConstantInit(0.),
+                 kernels_penalty=None, biases_penalty=None):
+        """Initialises a parameterised convolutional layer.
+
+        Args:
+            num_input_channels (int): Number of channels in inputs to
+                layer (this may be number of colour channels in the input
+                images if used as the first layer in a model, or the
+                number of output channels, a.k.a. feature maps, from a
+                a previous convolutional layer).
+            num_output_channels (int): Number of channels in outputs
+                from the layer, a.k.a. number of feature maps.
+            input_dim_1 (int): Size of first input dimension of each 2D
+                channel of inputs.
+            input_dim_2 (int): Size of second input dimension of each 2D
+                channel of inputs.
+            kernel_dim_x (int): Size of first dimension of each 2D channel of
+                kernels.
+            kernel_dim_y (int): Size of second dimension of each 2D channel of
+                kernels.
+            kernels_intialiser: Initialiser for the kernel parameters.
+            biases_initialiser: Initialiser for the bias parameters.
+            kernels_penalty: Kernel-dependent penalty term (regulariser) or
+                None if no regularisation is to be applied to the kernels.
+            biases_penalty: Biases-dependent penalty term (regulariser) or
+                None if no regularisation is to be applied to the biases.
+        """
+        self.num_input_channels = num_input_channels
+        self.num_output_channels = num_output_channels
+        self.input_dim_1 = input_dim_1
+        self.input_dim_2 = input_dim_2
+        self.kernel_dim_1 = kernel_dim_1
+        self.kernel_dim_2 = kernel_dim_2
+        self.kernels_init = kernels_init
+        self.biases_init = biases_init
+        self.kernels_shape = (
+            num_output_channels, num_input_channels, kernel_dim_1, kernel_dim_2
+        )
+        self.inputs_shape = (
+            None, num_input_channels, input_dim_1, input_dim_2
+        )
+        self.kernels = self.kernels_init(self.kernels_shape)
+        self.biases = self.biases_init(num_output_channels)
+        self.kernels_penalty = kernels_penalty
+        self.biases_penalty = biases_penalty
+        
+        self.trans_inputs_shape = (1, 1, 1, 1, 1, 1)
+        self.trans_inputs = np.zeros(self.trans_inputs_shape)
+        self.trans_padded_grads = np.zeros(self.trans_inputs_shape)
+        
+        self.fprop_done = False
+    
+    def copy(self, inputs, feat_map_shape, trans_inputs):
+        bs = inputs.shape[0]
+        H, W = inputs.shape[2], inputs.shape[3]
+        n_fm_in, n_fm_out, fH, fW, stride = feat_map_shape
+        assert (H - fH) % stride == 0 and (W - fW) % stride == 0
+        nH = (H - fH) / stride + 1
+        nW = (W - fW) / stride + 1
+        trans_inputs_shape = (bs, nH, nW, n_fm_in, fH, fW)
+        if trans_inputs.shape != trans_inputs_shape:
+            trans_inputs = np.zeros(trans_inputs_shape)
+
+        for i in xrange(nH):
+            for j in xrange(nW):
+                h_offset = i * stride
+                w_offset = j * stride
+                trans_inputs[:, i, j, :, :, :] = inputs[:, :, h_offset: h_offset + fH, w_offset: w_offset + fW]
+
+        return trans_inputs
+    
+
+    def conv2d_batch(self, trans_inputs, feat_map_shape, weight, bias):
+        bs = trans_inputs.shape[0]
+        n_fm_in, n_fm_out, fH, fW, _ = feat_map_shape
+        oH, oW = trans_inputs.shape[1], trans_inputs.shape[2]
+        ti_shape = trans_inputs.shape
+        trans_inputs.shape = (bs * oH * oW, n_fm_in * fH * fW)
+        wshape = weight.shape
+        weight.shape = (n_fm_out,  n_fm_in * fH * fW)
+        trans_outputs = np.dot( trans_inputs, weight.T ) + bias
+        trans_outputs.shape = (bs, oH, oW, n_fm_out)
+        weight.shape = wshape
+        trans_inputs.shape = ti_shape
+
+        return np.transpose(trans_outputs, (0, 3, 1, 2))
+    
+    
+    def get_rot180_kernels(self, kernels):
+        new_kernels = np.zeros_like(kernels)
+        for i in xrange(new_kernels.shape[0]):
+            for j in xrange(new_kernels.shape[1]):
+                new_kernels[i, j, :, :] = np.rot90( kernels[i, j, :, :], 2 )
+        
+        return new_kernels
+    
+    
+    def fprop(self, inputs):
+        """Forward propagates activations through the layer transformation.
+
+        For inputs `x`, outputs `y`, kernels `K` and biases `b` the layer
+        corresponds to `y = conv2d(x, K) + b`.
+
+        Args:
+            inputs: Array of layer inputs of shape (batch_size, input_dim).
+
+        Returns:
+            outputs: Array of layer outputs of shape (batch_size, output_dim).
+        """
+        
+        # new_kernels = self.get_rot180_kernels(self.kernels)
+        # use new kernels can get exactly the same results
+        feat_map_shape = (self.kernels_shape[1], self.kernels_shape[0], self.kernels_shape[2], self.kernels_shape[3], 1)
+        self.trans_inputs = self.copy(inputs, feat_map_shape, self.trans_inputs)
+        
+        self.fprop_done = True
+        # return self.conv2d_batch(self.trans_inputs, feat_map_shape, new_kernels, self.biases)
+        return self.conv2d_batch(self.trans_inputs, feat_map_shape, self.kernels, self.biases)
+    
+    
+    def bprop(self, inputs, outputs, grads_wrt_outputs):
+        """Back propagates gradients through a layer.
+
+        Given gradients with respect to the outputs of the layer calculates the
+        gradients with respect to the layer inputs.
+
+        Args:
+            inputs: Array of layer inputs of shape
+                (batch_size, num_input_channels, input_dim_1, input_dim_2).
+            outputs: Array of layer outputs calculated in forward pass of
+                shape
+                (batch_size, num_output_channels, output_dim_1, output_dim_2).
+            grads_wrt_outputs: Array of gradients with respect to the layer
+                outputs of shape
+                (batch_size, num_output_channels, output_dim_1, output_dim_2).
+
+        Returns:
+            Array of gradients with respect to the layer inputs of shape
+            (batch_size, input_dim).
+        """
+        n_fm_out, n_fm_in, fH, fW = self.kernels_shape
+        padded_grads = np.zeros( (grads_wrt_outputs.shape[0], grads_wrt_outputs.shape[1], 
+                 grads_wrt_outputs.shape[2] + 2*fH - 2, grads_wrt_outputs.shape[3] + 2*fW - 2) )
+        padded_grads[:, :, fH - 1: grads_wrt_outputs.shape[2] + fH - 1, 
+                     fW - 1: grads_wrt_outputs.shape[3] + fW - 1] = grads_wrt_outputs
+        
+        kernels_rev = np.zeros( (self.kernels_shape[1], 
+                               self.kernels_shape[0], self.kernels_shape[2], self.kernels_shape[3]) )
+        
+        for i in xrange(self.kernels_shape[0]):
+            for j in xrange(self.kernels_shape[1]):
+                # disable rot90 x 2 will get the exactly the same result
+                kernels_rev[j, i, :, :] = np.rot90( self.kernels[i, j, :, :], 2 )
+                # kernels_rev[j, i, :, :] = self.kernels[i, j, :, :]
+        
+        feat_map_shape = (self.kernels_shape[0], self.kernels_shape[1], self.kernels_shape[2], self.kernels_shape[3], 1)
+        self.trans_padded_grads = self.copy(padded_grads, feat_map_shape, self.trans_padded_grads)
+        
+        # return conv2d_batch(padded_grads, , kernels_rev, np.zeros(n_fm_in))
+        return self.conv2d_batch(self.trans_padded_grads, feat_map_shape, kernels_rev, np.zeros(n_fm_in))
+
+
+    def grads_wrt_params(self, inputs, grads_wrt_outputs):
+        """Calculates gradients with respect to layer parameters.
+
+        Args:
+            inputs: array of inputs to layer of shape (batch_size, input_dim)
+            grads_wrt_to_outputs: array of gradients with respect to the layer
+                outputs of shape
+                (batch_size, num_output_channels, output_dim_1, output_dim_2).
+
+        Returns:
+            list of arrays of gradients with respect to the layer parameters
+            `[grads_wrt_kernels, grads_wrt_biases]`.
+        """
+        if not self.fprop_done:
+            self.fprop(inputs)
+        
+        bs, n_fm_out, oH, oW = grads_wrt_outputs.shape
+        fH, fW = self.kernels_shape[2], self.kernels_shape[3]
+        n_fm_in = self.trans_inputs.shape[3]
+        grads = np.transpose(grads_wrt_outputs, (1, 0, 2, 3))
+        # grads.shape = (n_fm_out, bs * oH * oW)
+        grads = grads.reshape(n_fm_out, bs * oH * oW)
+        ti_shape = self.trans_inputs.shape
+        self.trans_inputs.shape = (bs * oH * oW, n_fm_in * fH * fW)
+        gradsKernels = np.dot(grads, self.trans_inputs)
+        gradsKernels.shape = (n_fm_out, n_fm_in, fH, fW)
+        
+        self.fprop_done = False
+        return ( gradsKernels, grads_wrt_outputs.sum((0, 2, 3)) )
+        # rotate gradsKernels
+        # gradsKernels = self.get_rot180_kernels(gradsKernels)
+        # return ( gradsKernels, grads_wrt_outputs.sum((0, 2, 3)) )
+        
+
+    def params_penalty(self):
+        """Returns the parameter dependent penalty term for this layer.
+
+        If no parameter-dependent penalty terms are set this returns zero.
+        """
+        params_penalty = 0
+        if self.kernels_penalty is not None:
+            params_penalty += self.kernels_penalty(self.kernels)
+        if self.biases_penalty is not None:
+            params_penalty += self.biases_penalty(self.biases)
+        return params_penalty
+
+    @property
+    def params(self):
+        """A list of layer parameter values: `[kernels, biases]`."""
+        return [self.kernels, self.biases]
+
+    @params.setter
+    def params(self, values):
+        self.kernels = values[0]
+        self.biases = values[1]
+
+    def __repr__(self):
+        return (
+            'ConvolutionalLayer(\n'
+            '    num_input_channels={0}, num_output_channels={1},\n'
+            '    input_dim_1={2}, input_dim_2={3},\n'
+            '    kernel_dim_1={4}, kernel_dim_2={5}\n'
+            ')'
+            .format(self.num_input_channels, self.num_output_channels,
+                    self.input_dim_1, self.input_dim_2, self.kernel_dim_1,
+                    self.kernel_dim_2)
+        )
+
+
+class DropoutLayer(StochasticLayer):
+    """Layer which stochastically drops input dimensions in its output."""
+    
+    def __init__(self, rng=None, incl_prob=0.5):
+        """Construct a new dropout layer.
+        
+        Args:
+            rng (RandomState): Seeded random number generator.
+            incl_prob: Scalar value in (0, 1] specifying the probability of
+                each input dimension being included in the output.
+        """
+        super(DropoutLayer, self).__init__(rng)
+        assert incl_prob > 0. and incl_prob <= 1.
+        self.incl_prob = incl_prob
+        
+    def fprop(self, inputs, stochastic=True):
+        """Forward propagates activations through the layer transformation.
+
+        Args:
+            inputs: Array of layer inputs of shape (batch_size, input_dim).
+            stochastic: Flag allowing different deterministic
+                forward-propagation mode in addition to default stochastic
+                forward-propagation e.g. for use at test time. If False
+                a deterministic forward-propagation transformation
+                corresponding to the expected output of the stochastic
+                forward-propagation is applied.
+
+        Returns:
+            outputs: Array of layer outputs of shape (batch_size, output_dim).
+        """
+        
+        if stochastic:
+            self.mask = self.rng.binomial(1, self.incl_prob, inputs.shape).astype('float')
+            return inputs * self.mask
+        else:
+            return inputs * self.incl_prob
+    
+    def bprop(self, inputs, outputs, grads_wrt_outputs):
+        """Back propagates gradients through a layer.
+
+        Given gradients with respect to the outputs of the layer calculates the
+        gradients with respect to the layer inputs. This should correspond to
+        default stochastic forward-propagation.
+
+        Args:
+            inputs: Array of layer inputs of shape (batch_size, input_dim).
+            outputs: Array of layer outputs calculated in forward pass of
+                shape (batch_size, output_dim).
+            grads_wrt_outputs: Array of gradients with respect to the layer
+                outputs of shape (batch_size, output_dim).
+
+        Returns:
+            Array of gradients with respect to the layer inputs of shape
+            (batch_size, input_dim).
+        """
+        return grads_wrt_outputs * self.mask
+
+    def __repr__(self):
+        return 'DropoutLayer(incl_prob={0:.1f})'.format(self.incl_prob)
+
+
+
+class MaxPooling2DLayer(Layer):
+    
+    def __init__(self, pool_size=(2,2)):
+        self.pool_size = pool_size
+    
+    def fprop(self, inputs):
+        """Forward propagates activations through the layer transformation.
+        
+        This corresponds to taking the maximum over non-overlapping pools of
+        inputs of a fixed size `pool_size`.
+
+        Args:
+            inputs: Array of layer inputs of shape (batch_size, input_filter_num, input_dim1, input_dim2).
+
+        Returns:
+            outputs: Array of layer outputs of shape (batch_size, output_dim).
+        """
+        assert inputs.shape[-1] % self.pool_size[-1] == 0 and inputs.shape[-2] % self.pool_size[-2] == 0, (
+            'Last dimension of inputs must be multiple of pool size')
+        shape = inputs.shape
+        ps = self.pool_size
+        return inputs.reshape( (shape[0], shape[1], shape[2]/ps[0], ps[0], shape[3]/ps[1], ps[1]) ).max((-1, -3))
+
+    def bprop(self, inputs, outputs, grads_wrt_outputs):
+        """Back propagates gradients through a layer.
+
+        Given gradients with respect to the outputs of the layer calculates the
+        gradients with respect to the layer inputs.
+
+        Args:
+            inputs: Array of layer inputs of shape (batch_size, input_dim).
+            outputs: Array of layer outputs calculated in forward pass of
+                shape (batch_size, output_dim).
+            grads_wrt_outputs: Array of gradients with respect to the layer
+                outputs of shape (batch_size, output_dim).
+
+        Returns:
+            Array of gradients with respect to the layer inputs of shape
+            (batch_size, input_dim).
+        """
+        shape = inputs.shape
+        ps = self.pool_size
+        tmp = ( inputs.reshape( (shape[0], shape[1], shape[2]/ps[0], ps[0], shape[3]/ps[1], ps[1]) ) == 
+        outputs.reshape( (outputs.shape[0], outputs.shape[1], 
+                        outputs.shape[2], 1, outputs.shape[3], 1) ) ).astype('float')
+        tmp_grads = tmp * grads_wrt_outputs.reshape( (outputs.shape[0], 
+                                                    outputs.shape[1], outputs.shape[2], 1, outputs.shape[3], 1) )
+        return tmp_grads.reshape( (inputs.shape[0], inputs.shape[1], inputs.shape[3], inputs.shape[3]) )
+
+    def __repr__(self):
+        return 'MaxPooling2DLayer(pool_size={0})'.format(self.pool_size)
+    

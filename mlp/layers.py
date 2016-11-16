@@ -907,3 +907,5 @@ class MaxPooling2DLayer(Layer):
     def __repr__(self):
         return 'MaxPooling2DLayer(pool_size={0})'.format(self.pool_size)
     
+
+

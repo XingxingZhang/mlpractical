@@ -19,7 +19,7 @@ class Optimiser(object):
 
     def __init__(self, model, error, learning_rule, train_dataset,
                  valid_dataset=None, data_monitors=None, schedulers=[],
-                 use_stochastic_eval=True):
+                 use_stochastic_eval=True, use_eval_mode=False):
         """Create a new optimiser instance.
 
         Args:
@@ -50,6 +50,7 @@ class Optimiser(object):
             self.data_monitors.update(data_monitors)
         self.schedulers = schedulers
         self.use_stochastic_eval = use_stochastic_eval
+        self.use_eval_mode = use_eval_mode
 
     def do_training_epoch(self):
         """Do a single training epoch.
@@ -96,10 +97,16 @@ class Optimiser(object):
             values corresponding to the value of the statistic.
         """
         epoch_stats = OrderedDict()
+        
+        self.model.set_batch_norm_mode(True, True)
         epoch_stats.update(self.eval_monitors(self.train_dataset, '(train)'))
         if self.valid_dataset is not None:
+            self.model.set_batch_norm_mode(False, False)
             epoch_stats.update(self.eval_monitors(
                 self.valid_dataset, '(valid)'))
+            
+        self.model.set_batch_norm_mode(False, True)
+        
         epoch_stats['params_penalty'] = self.model.params_penalty()
         return epoch_stats
 

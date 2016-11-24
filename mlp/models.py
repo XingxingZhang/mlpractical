@@ -8,7 +8,7 @@ outputs (and intermediate states) and for calculating gradients of scalar
 functions of the outputs with respect to the model parameters.
 """
 
-from mlp.layers import LayerWithParameters, StochasticLayer
+from mlp.layers import LayerWithParameters, StochasticLayer, BatchNormalization
 
 
 class SingleLayerModel(object):
@@ -115,6 +115,7 @@ class MultipleLayerModel(object):
                 activations.append(self.layers[i].fprop(activations[i]))
         return activations
 
+    
     def grads_wrt_params(self, activations, grads_wrt_outputs):
         """Calculates gradients with respect to the model parameters.
 
@@ -145,6 +146,7 @@ class MultipleLayerModel(object):
                     inputs, outputs, grads_wrt_outputs)
         return grads_wrt_params[::-1]
 
+    
     def params_penalty(self):
         """Calculates the parameter dependent penalty term of the model."""
         params_penalty = 0.
@@ -152,6 +154,18 @@ class MultipleLayerModel(object):
             if isinstance(layer, LayerWithParameters):
                 params_penalty += layer.params_penalty()
         return params_penalty
+    
+    
+    def set_batch_norm_mode(self, acc_mode, train_mode):
+        for layer in self.layers:
+            if isinstance(layer, BatchNormalization):
+                if acc_mode:
+                    layer.acc_stats_mode()
+                else:
+                    layer.acc_stats_mode_off()
+                
+                layer.train = train_mode
+    
 
     def __repr__(self):
         return (
